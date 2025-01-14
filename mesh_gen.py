@@ -1,16 +1,23 @@
+import os
+import sys
+import shutil
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+# External Libraries
 import cv2
 import mediapipe as mp
 import numpy as np
-import os
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
-import sys
-import shutil
+import trimesh
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from scipy.spatial import Delaunay
+
 
 # Initialize MediaPipe Face Mesh and Face Detection
-mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
-mp_face_detection = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.3)
+mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=False)
+mp_face_detection = mp.solutions.face_detection.FaceDetection(min_detection_confidence=.4)
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
@@ -30,7 +37,7 @@ os.makedirs(output_dir, exist_ok=True)
 
 # UI Setup
 root = tk.Tk()
-root.title("Face Mesh Setup")
+root.title("Mesh Gen")
 root.geometry("900x500")
 root.resizable(False, False)
 root.configure(bg="#f0f0f0")
@@ -62,13 +69,13 @@ def select_images_folder():
 
 def select_video():
     global video_path
-    video_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4;*.avi;*.mov")])
+    video_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4;*.avi;*.mov*; *.mkv")])
     if video_path:
         setup_video_ui()
 
 def setup_video_ui():
     clear_ui()
-    ttk.Label(root, text="Analyze every X frames:").pack(pady=(20, 5))
+    ttk.Label(root, text="Enter frame sampling rate:").pack(pady=(20, 5))
     entry = ttk.Entry(root)
     entry.pack(pady=(0, 10))
     ttk.Button(root, text="Continue", command=lambda: continue_video_processing(entry)).pack(pady=(10, 20))
@@ -90,7 +97,7 @@ def process_video():
 
     cap = cv2.VideoCapture(video_path)
     frame_count = 0
-
+    root.config(cursor="watch")
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -136,11 +143,23 @@ def finalize_ui(valid_images):
     if valid_images > 0:
         ttk.Button(root, text="Create Mesh", command=create_mesh).pack(pady=(10, 20))
 
+# Perspective Adjustment Function
+def adjust_perspective(landmarks, image_width, image_height):
+    adjusted_landmarks = []
+    for lm in landmarks:
+        x = lm.x * image_width
+        y = lm.y * image_height
+        z = lm.z * max(image_width, image_height)  # Scale Z dimension proportionally
+        adjusted_landmarks.append((x, y, z))
+    return np.array(adjusted_landmarks)
+
 def create_mesh():
     clear_ui()
     root.config(cursor="watch")
+
     image_files = [f for f in os.listdir(media_dir) if os.path.isfile(os.path.join(media_dir, f))]
     total_images = len(image_files)
+    aggregated_landmarks = []
 
     frame_label = ttk.Label(root)
     frame_label.pack(pady=(20, 10))
@@ -151,16 +170,20 @@ def create_mesh():
     for idx, image_file in enumerate(image_files):
         image_path = os.path.join(media_dir, image_file)
         image = cv2.imread(image_path)
-
         if image is None:
             continue
+
+        image_height, image_width, _ = image.shape
 
         results = mp_face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         if not results.multi_face_landmarks:
             continue
 
         for face_landmarks in results.multi_face_landmarks:
-            face_data.append([(lm.x, lm.y, lm.z) for lm in face_landmarks.landmark])
+            adjusted_landmarks = adjust_perspective(face_landmarks.landmark, image_width, image_height)
+            aggregated_landmarks.append(adjusted_landmarks)
+
+            # Draw landmarks on the image
             mp_drawing.draw_landmarks(
                 image,
                 face_landmarks,
@@ -174,66 +197,143 @@ def create_mesh():
         frame_label.config(image=frame_pil)
         frame_label.image = frame_pil
         processing_label.config(text=f"Processing frame {idx + 1} of {total_images}")
-
         root.update()
 
-    save_face_data()
-    create_final_images()
-    finalize_results_ui()
+    # Average the landmarks to create the final mesh
+    if aggregated_landmarks:
+        processing_label.config(text=f"Generating Face Mesh...")
+        root.update()
+        averaged_landmarks = np.mean(aggregated_landmarks, axis=0)
+        save_face_data(averaged_landmarks)
+        #gen = imgs("final_outputs/face_data.obj")
+        #gen.create_gif()      
+        #gen.create_gif_with_surface()
+        finalize_results_ui()
+    root.config(cursor="")
 
-def save_face_data():
-    with open(os.path.join(output_dir, "face_data.obj"), "w") as f:
-        for landmarks in face_data:
-            for x, y, z in landmarks:
-                f.write(f"v {x} {y} {z}\n")
+def save_face_data(landmarks):
+    obj_filepath = os.path.join(output_dir, "face_data.obj")
+    with open(obj_filepath, "w") as f:
+        f.write("# Generated by Mesh Gen\n")
+        for x, y, z in landmarks:
+            y = y * -1
+            z = z * -1
+            f.write(f"v {x:.4f} {y:.4f} {z:.4f}\n")
+        f.write("\n")
+    print(f"OBJ file saved at: {obj_filepath}")
 
-def create_final_images():
-    aggregated_data = np.mean(np.array(face_data), axis=0)
-    aggregated_image = np.zeros((512, 512, 3), dtype=np.uint8)
+# Normalize landmarks to fit within the image canvas
+def normalize_landmarks(landmarks, image_size):
+    normalized = []
+    for lm in landmarks:
+        x = int(lm[0] * image_size)
+        y = int(lm[1] * image_size)
+        z = lm[2]
+        normalized.append((x, y, z))
+    return normalized
 
-    for connection in mp.solutions.face_mesh.FACEMESH_TESSELATION:
-        start_idx, end_idx = connection
-        start_point = (int(aggregated_data[start_idx][0] * 512), int(aggregated_data[start_idx][1] * 512))
-        end_point = (int(aggregated_data[end_idx][0] * 512), int(aggregated_data[end_idx][1] * 512))
-        cv2.line(aggregated_image, start_point, end_point, (0, 255, 0), 1)
 
-    cv2.imwrite(os.path.join(output_dir, "final_mesh_lines.png"), aggregated_image)
 
-    textured_image = np.zeros_like(aggregated_image)
-    for landmark in aggregated_data:
-        x, y = int(landmark[0] * 512), int(landmark[1] * 512)
-        cv2.circle(textured_image, (x, y), 1, (200, 180, 150), -1)
+def display_3d_obj():
+    filepath = os.path.join(output_dir, "face_data.obj")
+    if not os.path.exists(filepath):
+        messagebox.showerror("Error", "OBJ file not found.")
+        return
 
-    cv2.imwrite(os.path.join(output_dir, "final_textured_face.png"), textured_image)
+    try:
+        # Load the OBJ file
+        mesh = trimesh.load(filepath)
+
+        # Create a new Tkinter window
+        root = tk.Toplevel()
+        root.title("3D Viewer")
+
+        # Create a Matplotlib figure
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Function to set equal aspect ratio
+        def set_equal_aspect_ratio(ax, vertices):
+            x_range = max(vertices[:, 0]) - min(vertices[:, 0])
+            y_range = max(vertices[:, 1]) - min(vertices[:, 1])
+            z_range = max(vertices[:, 2]) - min(vertices[:, 2])
+            max_range = max(x_range, y_range, z_range)
+
+            ax.set_box_aspect([x_range / max_range, y_range / max_range, z_range / max_range])
+
+        # Function to draw the point cloud
+        def draw_dots():
+            ax.clear()
+            ax.scatter(mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.vertices[:, 2], c='lightblue', marker='o', s=4)
+            set_equal_aspect_ratio(ax, mesh.vertices)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.grid(False)
+            ax.set_facecolor('white')
+            ax.view_init(elev=90, azim=-90)
+            canvas.draw()
+
+        # Function to draw the surface
+        def draw_surface():
+            ax.clear()
+            tri = Delaunay(mesh.vertices[:, :2])
+            ax.plot_trisurf(mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.vertices[:, 2], triangles=tri.simplices, color='lightblue', alpha=0.7)
+            set_equal_aspect_ratio(ax, mesh.vertices)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.grid(False)
+            ax.set_facecolor('white')
+            ax.view_init(elev=90, azim=-90)
+            canvas.draw()
+
+        # Function to toggle between dots and surface
+        def toggle_view():
+            nonlocal plot_mode
+            if plot_mode == "dots":
+                draw_surface()
+                plot_mode = "surface"
+            else:
+                draw_dots()
+                plot_mode = "dots"
+
+        # Create a canvas to embed the Matplotlib plot in Tkinter
+        canvas = FigureCanvasTkAgg(fig, master=root)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Add a toggle button
+        toggle_button = tk.Button(root, text="Toggle View", command=toggle_view)
+        toggle_button.pack(pady=10)
+
+        # Set initial plot mode and draw the dots view
+        plot_mode = "dots"
+        draw_dots()
+
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
 
 def finalize_results_ui():
     root.config(cursor="")
     clear_ui()
-    canvas = tk.Canvas(root)
-    scrollbar = ttk.Scrollbar(root, orient=tk.VERTICAL, command=canvas.yview)
-    scrollable_frame = ttk.Frame(canvas)
 
-    scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
+    # Create a main frame to center all elements
+    main_frame = ttk.Frame(root)
+    main_frame.place(relx=0.5, rely=0.5, anchor="center")
 
-    ttk.Button(scrollable_frame, text="Save Face Model (OBJ)", command=save_face_model).pack(pady=10)
+    # Add a button to display the 3D model
+    view_3d_button = ttk.Button(main_frame, text="View 3D Model", command=lambda: display_3d_obj())
+    view_3d_button.grid(row=0, column=0, pady=10)
 
-    final_images = ["final_mesh_lines.png", "final_textured_face.png"]
-    for img in final_images:
-        img_path = os.path.join(output_dir, img)
-        image = Image.open(img_path)
-        image = image.resize((200, 200), Image.Resampling.LANCZOS)
-        img_display = ImageTk.PhotoImage(image)
-        img_label = ttk.Label(scrollable_frame, image=img_display)
-        img_label.image = img_display
-        img_label.pack(pady=5)
-        img_label.bind("<Button-1>", lambda e, path=img_path: open_file_explorer(path))
+    # Add a button to save the face_data.obj file
+    save_button = ttk.Button(main_frame, text="Download Face Model (OBJ)", command=save_face_model)
+    save_button.grid(row=1, column=0, pady=10)
 
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
+    # Add a Done button to restart the app
+    done_button = ttk.Button(main_frame, text="Done", command=restart)
+    done_button.grid(row=2, column=0, pady=20)
 
-    ttk.Button(scrollable_frame, text="Done", command=restart).pack(pady=20)
 
 def save_face_model():
     file_path = filedialog.asksaveasfilename(defaultextension=".obj", filetypes=[("OBJ files", "*.obj")])
@@ -252,9 +352,20 @@ def restart():
     root.destroy()
     os.execl(sys.executable, sys.executable, *sys.argv)
 
-# Initial Buttons
-button_frame = ttk.Frame(root)
-button_frame.pack(pady=(40, 40), padx=(10, 10), fill=tk.BOTH, expand=True)
+
+
+
+
+
+# Centering the UI Elements
+main_frame = ttk.Frame(root)
+main_frame.place(relx=0.5, rely=0.5, anchor="center")
+
+label_instruction = ttk.Label(main_frame, text="To generate a face model, please select either a video or image folder containing a single face.")
+label_instruction.grid(row=0, column=0, columnspan=2, pady=(0, 20))
+
+button_frame = ttk.Frame(main_frame)
+button_frame.grid(row=1, column=0, columnspan=2)
 
 image_button = ttk.Button(button_frame, text="Select Images Folder", command=select_images_folder)
 video_button = ttk.Button(button_frame, text="Select Video", command=select_video)
@@ -266,3 +377,4 @@ button_frame.grid_columnconfigure(0, weight=1)
 button_frame.grid_columnconfigure(1, weight=1)
 
 root.mainloop()
+

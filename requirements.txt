@@ -1,4 +1,8 @@
+numpy
 opencv-python
 mediapipe
-numpy
 Pillow
+trimesh
+matplotlib
+scipy
+tkinterweb
